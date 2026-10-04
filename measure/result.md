@@ -36,3 +36,24 @@
 |---|---|---|
 | RV32_ISS | 1.72 × 10⁷ | 1.09 × 10⁶ |
 | RV32_5S | 1.51 × 10⁵ | 2.05 × 10⁴ |
+
+# Host memory per guest byte
+
+## Method
+- Program: measure/fill.s (sw into SIZE bytes from 0x20000000, then spin 5×10⁷ iterations)
+- Tool: measure/peakmem.ps1 (samples PeakWorkingSet64 of the Ripes process every 100 ms)
+- Processor: RV32_ISS
+
+## Raw data
+| SIZE (bytes) | instructions retired | run 1 (B) | run 2 (B) | mean (B) |
+|---|---|---|---|---|
+| 4,096 | 100,003,080 | 25,018,368 | 25,018,368 | 25,018,368 |
+| 1,048,576 | 100,786,440 | 110,166,016 | 108,896,256 | 109,531,136 |
+| 4,194,304 | 103,145,736 | 363,225,088 | 361,820,160 | 362,522,624 |
+
+## Result
+| pair | host bytes / guest byte |
+|---|---|
+| 1 MiB − 4 KiB | 80.9 |
+| 4 MiB − 4 KiB | 80.6 |
+| 4 MiB − 1 MiB | 80.4 |
