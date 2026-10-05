@@ -3,3 +3,7 @@
 *.swp
 solver
 mini
+ida
+*.elf
+rubik_full.s
+.vscode/
