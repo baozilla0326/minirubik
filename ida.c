@@ -5,6 +5,7 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum { CUBIES = 7, PERMUTATIONS = 5040, ORIENTATIONS = 729, FACES = 3 };
@@ -251,6 +252,120 @@ static int check(state_t s, const uint8_t *path, int len)
     return 1;
 }
 
+/* ---- Step 4: host-side gates against the exact BFS distance table ---- */
+enum { STATES = PERMUTATIONS * ORIENTATIONS };
+
+/* Exact distance of every state, by BFS over the composite rank. */
+static uint8_t *build_exact(void)
+{
+    uint8_t *dist = malloc(STATES);
+    uint32_t *queue = malloc((size_t) STATES * sizeof *queue);
+    uint32_t head = 0, tail = 0;
+    if (!dist || !queue) {
+        free(dist);
+        free(queue);
+        return NULL;
+    }
+    memset(dist, 0xFF, STATES);
+    dist[0] = 0;
+    queue[tail++] = 0;
+    while (head < tail) {
+        uint32_t here = queue[head++];
+        uint16_t p = (uint16_t) (here / ORIENTATIONS);
+        uint16_t o = (uint16_t) (here % ORIENTATIONS);
+        for (uint8_t f = 0; f < FACES; ++f) {
+            uint16_t np = p, no = o;
+            for (uint8_t t = 0; t < 3; ++t) {
+                np = perm_move[f][np];
+                no = ori_move[f][no];
+                uint32_t there = (uint32_t) np * ORIENTATIONS + no;
+                if (dist[there] == 0xFF) {
+                    dist[there] = (uint8_t) (dist[here] + 1);
+                    queue[tail++] = there;
+                }
+            }
+        }
+    }
+    free(queue);
+    return dist;
+}
+
+/* Does path bring (p, o) back to the solved coordinates (0, 0)? */
+static int reaches_solved(uint16_t p, uint16_t o, const uint8_t *path, int len)
+{
+    for (int i = 0; i < len; ++i)
+        for (uint8_t t = 0; t <= path[i] % 3; ++t) {
+            p = perm_move[path[i] / 3][p];
+            o = ori_move[path[i] / 3][o];
+        }
+    return p == 0 && o == 0;
+}
+
+/* H1 over every state; the search over every distance-11 state; and, when
+ * full is set, H3 over every state. Returns 0 if all checks pass. */
+static int run_gates(int full)
+{
+    uint8_t *dist = build_exact();
+    if (!dist) {
+        fputs("out of memory\n", stderr);
+        return 1;
+    }
+    int bad = 0;
+
+    /* H1: the heuristic never exceeds the true distance. */
+    unsigned long h1_fail = 0;
+    for (uint32_t r = 0; r < STATES; ++r)
+        if (heuristic((uint16_t) (r / ORIENTATIONS),
+                      (uint16_t) (r % ORIENTATIONS)) > dist[r])
+            ++h1_fail;
+    printf("H1 admissibility: %lu violations over %u states\n", h1_fail,
+           STATES);
+    bad |= h1_fail != 0;
+
+    /* Search cost over the hardest states, or over all states for H3. */
+    unsigned long worst = 0, total = 0, count = 0, wrong = 0;
+    uint32_t worst_rank = 0;
+    uint8_t path[MAX_DEPTH];
+    for (uint32_t r = 0; r < STATES; ++r) {
+        if (!full && dist[r] != 11)
+            continue;
+        uint16_t p = (uint16_t) (r / ORIENTATIONS);
+        uint16_t o = (uint16_t) (r % ORIENTATIONS);
+        int len = ida(p, o, path);
+        if (len != dist[r] || !reaches_solved(p, o, path, len))
+            ++wrong;
+        if (dist[r] == 11) {
+            ++count;
+            total += nodes;
+            if (nodes > worst) {
+                worst = nodes;
+                worst_rank = r;
+            }
+        }
+    }
+    printf("%s: %lu wrong\n",
+           full ? "H3 optimality over all states"
+                : "distance-11 states solved optimally",
+           wrong);
+    printf("distance-11 states: %lu, nodes max %lu, mean %lu\n", count, worst,
+           count ? total / count : 0);
+
+    /* Print the worst state as a 14-digit input. */
+    state_t s;
+    perm_unrank((uint16_t) (worst_rank / ORIENTATIONS), &s);
+    ori_unrank((uint16_t) (worst_rank % ORIENTATIONS), &s);
+    printf("worst state: ");
+    for (int i = 0; i < CUBIES; ++i)
+        putchar('1' + s.p[i]);
+    for (int i = 0; i < CUBIES; ++i)
+        putchar('1' + s.o[i]);
+    putchar('\n');
+
+    bad |= wrong != 0;
+    free(dist);
+    return bad;
+}
+
 int main(int argc, char **argv)
 {
     build_moves();
@@ -260,6 +375,11 @@ int main(int argc, char **argv)
     ok &= report("permutation", perm_dist, PERMUTATIONS);
     if (!ok)
         return 1;
+
+    if (argc > 1 && !strcmp(argv[1], "--gates"))
+        return run_gates(0); /* H1 + every distance-11 state */
+    if (argc > 1 && !strcmp(argv[1], "--h3"))
+        return run_gates(1); /* H1 + H3 over every state (minutes) */
 
     const char *input = argc > 1 ? argv[1] : "21345671111111";
     state_t s;
