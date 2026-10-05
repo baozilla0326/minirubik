@@ -5,6 +5,8 @@
  * Step 2b: finer pattern tables D and G, built from the exact BFS table.
  * Step 3:  iterative IDA* with h = max(D, G).
  * Step 4:  host-side gates H1 and H3 against the exact table.
+ * Stage 3: ida_fast(), the same search without multiply, divide or modulo
+ *          in the loop, checked node for node against ida().
  *
  * Usage: ./ida [STATE] | --gates | --h3 | --compare
  */
@@ -282,6 +284,7 @@ enum { MAX_DEPTH = 11, MOVES = 9 };
 static const char *const move_names[MOVES] = {"R",  "R2", "R'", "B", "B2",
                                               "B'", "D",  "D2", "D'"};
 static unsigned long nodes; /* states generated during the last search */
+static unsigned long turns; /* quarter turns applied during the last search */
 
 /* Which tables the heuristic uses: bit 0 picks D over A, bit 1 picks G over
  * B. The default, 3, is max(D, G); the others exist for --compare. */
@@ -303,6 +306,7 @@ static int ida(uint16_t p0, uint16_t o0, uint16_t q0, uint8_t *path)
     uint8_t next[MAX_DEPTH + 1];
 
     nodes = 1;
+    turns = 0;
     if (heuristic(p0, o0, q0) == 0)
         return 0; /* already solved */
     p[0] = p0;
@@ -325,6 +329,7 @@ static int ida(uint16_t p0, uint16_t o0, uint16_t q0, uint8_t *path)
                 np = perm_move[face][np];
                 no = ori_move[face][no];
                 nq = pair_move[face][nq];
+                ++turns;
             }
             ++nodes;
             uint8_t h = heuristic(np, no, nq);
@@ -341,6 +346,89 @@ static int ida(uint16_t p0, uint16_t o0, uint16_t q0, uint8_t *path)
         }
     }
     return -1; /* not reached for a valid cube */
+}
+
+/* ---- Stage 3: the same search, restructured for RV32I ----
+ * - pair_pos / pair_twist replace the divisions and modulos on q;
+ * - o * 49 and p * 9 become shifts and adds;
+ * - a face loop and a turn loop replace m / 3 and m % 3;
+ * - each quarter turn continues from the previous one, so a face costs three
+ *   quarter turns instead of 1 + 2 + 3 = 6.
+ * It must visit exactly the same nodes as ida(); run_gates checks that. */
+static uint8_t pair_pos[PAIR];   /* positions of cubies 1 and 2, 0..48 */
+static uint8_t pair_twist[PAIR]; /* twists of cubies 1 and 2, 0..8 */
+
+static void build_pair_parts(void)
+{
+    for (uint16_t q = 0; q < PAIR; ++q) {
+        pair_pos[q] = (uint8_t) ((q / 21 / 3) * 7 + (q % 21 / 3));
+        pair_twist[q] = (uint8_t) ((q / 21 % 3) * 3 + (q % 21 % 3));
+    }
+}
+
+static uint8_t heuristic_fast(uint16_t p, uint16_t o, uint16_t q)
+{
+    uint32_t di = ((uint32_t) o << 5) + ((uint32_t) o << 4) + o + pair_pos[q];
+    uint32_t gi = ((uint32_t) p << 3) + p + pair_twist[q];
+    uint8_t a = d_tab[di], b = g_tab[gi];
+    return a > b ? a : b;
+}
+
+static int ida_fast(uint16_t p0, uint16_t o0, uint16_t q0, uint8_t *path)
+{
+    /* p[d+1], o[d+1], q[d+1] hold the child being tried at depth d */
+    uint16_t p[MAX_DEPTH + 1], o[MAX_DEPTH + 1], q[MAX_DEPTH + 1];
+    uint8_t face[MAX_DEPTH], turn[MAX_DEPTH], next_face[MAX_DEPTH];
+
+    nodes = 1;
+    turns = 0;
+    uint8_t h0 = heuristic_fast(p0, o0, q0);
+    if (h0 == 0)
+        return 0;
+    p[0] = p0;
+    o[0] = o0;
+    q[0] = q0;
+    for (int bound = h0; bound <= MAX_DEPTH; ++bound) {
+        int d = 0;
+        next_face[0] = 0;
+        turn[0] = 2; /* 2 = this face is finished: start the next one */
+        while (d >= 0) {
+            if (turn[d] == 2) {
+                uint8_t f = next_face[d];
+                if (d > 0 && f == face[d - 1])
+                    ++f; /* never the same face twice in a row */
+                if (f == FACES) {
+                    --d; /* every face tried here: back up */
+                    continue;
+                }
+                face[d] = f;
+                next_face[d] = (uint8_t) (f + 1);
+                turn[d] = 0;
+                p[d + 1] = p[d];
+                o[d + 1] = o[d];
+                q[d + 1] = q[d];
+            } else {
+                ++turn[d];
+            }
+            /* one more quarter turn on top of the previous one */
+            uint8_t f = face[d];
+            p[d + 1] = perm_move[f][p[d + 1]];
+            o[d + 1] = ori_move[f][o[d + 1]];
+            q[d + 1] = pair_move[f][q[d + 1]];
+            ++turns;
+            ++nodes;
+            uint8_t h = heuristic_fast(p[d + 1], o[d + 1], q[d + 1]);
+            if (d + 1 + h > bound)
+                continue;
+            path[d] = (uint8_t) ((f << 1) + f + turn[d]); /* f * 3 + turn */
+            if (h == 0)
+                return d + 1;
+            ++d;
+            next_face[d] = 0;
+            turn[d] = 2;
+        }
+    }
+    return -1;
 }
 
 /* Parse a 14-digit state; return 0 if it is not a valid cube. */
@@ -421,6 +509,7 @@ static int run_gates(const uint8_t *dist, int full)
 
     /* Search cost over the hardest states, or over all states for H3. */
     unsigned long worst = 0, total = 0, count = 0, wrong = 0;
+    unsigned long fast_mismatch = 0, turns_slow = 0, turns_fast = 0;
     uint32_t worst_rank = 0;
     uint8_t path[MAX_DEPTH];
     for (uint32_t r = 0; r < STATES; ++r) {
@@ -431,6 +520,16 @@ static int run_gates(const uint8_t *dist, int full)
         if (len != dist[r] || !reaches_solved(p, o, path, len))
             ++wrong;
         if (dist[r] == 11) {
+            unsigned long slow_nodes = nodes, slow_turns = turns;
+            uint8_t fast_path[MAX_DEPTH];
+            int fast_len = use_tables == 3 ? ida_fast(p, o, q, fast_path) : len;
+            if (use_tables == 3 &&
+                (fast_len != len || nodes != slow_nodes ||
+                 memcmp(fast_path, path, (size_t) len) != 0))
+                ++fast_mismatch;
+            turns_slow += slow_turns;
+            turns_fast += use_tables == 3 ? turns : slow_turns;
+            nodes = slow_nodes;
             ++count;
             total += nodes;
             if (nodes > worst) {
@@ -445,6 +544,13 @@ static int run_gates(const uint8_t *dist, int full)
            wrong);
     printf("distance-11 states: %lu, nodes max %lu, mean %lu\n", count, worst,
            count ? total / count : 0);
+    if (use_tables == 3) {
+        printf("Stage 3 search: %lu mismatches against ida()\n", fast_mismatch);
+        printf("quarter turns per node: %.2f before, %.2f after\n",
+               (double) turns_slow / (double) total,
+               (double) turns_fast / (double) total);
+        bad |= fast_mismatch != 0;
+    }
 
     /* Print the worst state as a 14-digit input. */
     state_t s;
@@ -482,6 +588,7 @@ int main(int argc, char **argv)
         return 1;
 
     build_pair_moves();
+    build_pair_parts();
     uint8_t *dist = build_exact();
     if (!dist) {
         fputs("out of memory\n", stderr);
@@ -518,7 +625,7 @@ int main(int argc, char **argv)
             return 2;
         }
         uint8_t path[MAX_DEPTH];
-        int len = ida(perm_rank(&s), ori_rank(&s), pair_of(&s), path);
+        int len = ida_fast(perm_rank(&s), ori_rank(&s), pair_of(&s), path);
         printf("%s:", input);
         for (int i = 0; i < len; ++i)
             printf(" %s", move_names[path[i]]);
