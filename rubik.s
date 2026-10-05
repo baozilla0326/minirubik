@@ -1,7 +1,7 @@
 # rubik.s: optimal 2x2x2 solver in RV32I (no M extension)
 
         .data
-input:   .string "21345671111111"     # 要解的方塊（14 碼）
+input:   .string "12345672111113"     # 要解的方塊（14 碼）
 cube_p:  .zero   7                    # 座位：每格 0～6
 cube_o:  .zero   7                    # 坐姿：每格 0～2
 msg_bad: .string "invalid state\n"
@@ -60,9 +60,22 @@ mod3:
 mod3_done:
         bnez  t5, invalid
 
-        # 暫時：印出 valid 測試
-        la    a0, msg_ok
-        li    a7, 4
+        # ===== 4.3：坐姿號碼 o =====
+        la    t0, cube_o
+        li    t4, 6
+        li    s1, 0               # s1 = o
+ori_loop:
+        lbu   t1, 0(t0)
+        slli  t2, s1, 1           # t2 = o × 2
+        add   s1, s1, t2          # s1 = o × 3
+        add   s1, s1, t1          # s1 = o × 3 + cube_o[i]
+        addi  t0, t0, 1
+        addi  t4, t4, -1
+        bnez  t4, ori_loop
+
+        # 暫時：印出 o 檢查，然後結束
+        mv    a0, s1
+        li    a7, 1
         ecall
         li    a7, 10
         ecall
