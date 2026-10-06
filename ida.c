@@ -9,6 +9,7 @@
  *          in the loop, checked node for node against ida().
  *
  * Usage: ./ida [STATE] | --gates | --h3 | --compare | --emit [FILE] | --emit-c [FILE]
+ *        | --list11 (every distance-11 state and its node count)
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -708,6 +709,24 @@ int main(int argc, char **argv)
         rc = emit_tables(argc > 2 ? argv[2] : "tables.s");
     } else if (argc > 1 && !strcmp(argv[1], "--emit-c")) {
         rc = emit_c_tables(argc > 2 ? argv[2] : "tables.h");
+    } else if (argc > 1 && !strcmp(argv[1], "--list11")) {
+        /* every distance-11 state with its node count, one per line */
+        uint8_t path[MAX_DEPTH];
+        for (uint32_t r = 0; r < STATES; ++r) {
+            if (dist[r] != 11)
+                continue;
+            uint16_t p, o, q;
+            coords(r, &p, &o, &q);
+            ida_fast(p, o, q, path);
+            state_t s;
+            perm_unrank(p, &s);
+            ori_unrank(o, &s);
+            for (int i = 0; i < CUBIES; ++i)
+                putchar('1' + s.p[i]);
+            for (int i = 0; i < CUBIES; ++i)
+                putchar('1' + s.o[i]);
+            printf(" %lu\n", nodes);
+        }
     } else if (argc > 1 && !strcmp(argv[1], "--compare")) {
         static const char *const name[4] = {"max(A, B)", "max(D, B)",
                                             "max(A, G)", "max(D, G)"};

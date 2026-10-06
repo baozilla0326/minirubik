@@ -7,3 +7,4 @@ ida
 *.elf
 rubik_full.s
 .vscode/
+measure/all11/
