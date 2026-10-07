@@ -13,6 +13,9 @@ param(
 
 $root = Split-Path -Parent $PSScriptRoot
 $src = Get-Content -Raw -Encoding UTF8 (Join-Path $root 'rubik.s')
+# CLI build: drop every block between RENDER-BEGIN and RENDER-END (the LED
+# renderer), since Ripes has no .if and the CLI instantiates no LED matrix.
+$src = [regex]::Replace($src, '(?ms)^# RENDER-BEGIN.*?^# RENDER-END[^\n]*\n', '')
 $tables = Get-Content -Raw -Encoding UTF8 (Join-Path $root 'tables.s')
 
 $cases = @(

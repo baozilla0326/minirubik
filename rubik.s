@@ -19,6 +19,32 @@ mnames:                               # 9 個轉法名字，每個 4 bytes（ASC
          .byte 82, 0, 0, 0,  82, 50, 0, 0,  82, 39, 0, 0
          .byte 66, 0, 0, 0,  66, 50, 0, 0,  66, 39, 0, 0
          .byte 68, 0, 0, 0,  68, 50, 0, 0,  68, 39, 0, 0
+# RENDER-BEGIN
+        .equ  DELAY, 30000            # 每一步之間空轉幾圈
+fl_tab:                               # 24 格貼紙：x, y, 位置, 第幾張貼紙
+        .byte 9, 0, 7, 0,   13, 0, 4, 0,   9, 3, 0, 0,   13, 3, 1, 0
+        .byte 0, 7, 7, 2,   4, 7, 0, 1,    9, 7, 0, 2,   13, 7, 1, 1
+        .byte 18, 7, 1, 2,  22, 7, 4, 1,   27, 7, 4, 2,  31, 7, 7, 1
+        .byte 0, 10, 6, 1,  4, 10, 3, 2,   9, 10, 3, 1,  13, 10, 2, 2
+        .byte 18, 10, 2, 1, 22, 10, 5, 2,  27, 10, 5, 1, 31, 10, 6, 2
+        .byte 9, 14, 3, 0,  13, 14, 2, 0,  9, 17, 6, 0,  13, 17, 5, 0
+cub_col:                              # 角塊 0～7 的三張貼紙各屬於哪一面
+        .byte 0, 5, 2,  0, 2, 4,  1, 4, 2,  1, 2, 5
+        .byte 0, 4, 3,  1, 3, 4,  1, 5, 3,  0, 3, 5
+src_tab:                              # solver.c 的 source[3][7]
+        .byte 1, 4, 2, 0, 3, 5, 6
+        .byte 0, 1, 2, 4, 5, 6, 3
+        .byte 0, 2, 5, 3, 1, 4, 6
+tw_tab:                               # solver.c 的 twist[3][7]
+        .byte 1, 2, 0, 2, 1, 0, 0
+        .byte 0, 0, 0, 1, 2, 1, 2
+        .byte 0, 0, 0, 0, 0, 0, 0
+new_p:   .zero   7
+new_o:   .zero   7
+        .align 2
+face_rgb:                             # U 白、D 黃、F 綠、B 藍、R 紅、L 橘
+        .word 0xFFFFFF, 0xFFFF00, 0x00FF00, 0x0000FF, 0xFF0000, 0xFF8000
+# RENDER-END
         .align 2
 row_perm: .word 0, 10080, 20160        # 每一面那一列在 perm_move 裡的位移（bytes）
 row_ori:  .word 0, 1458, 2916
@@ -403,6 +429,37 @@ verify_check:
         li    t0, EXPECT
         bne   s6, t0, fail
 
+# RENDER-BEGIN
+        # ===== LED 動畫：從打亂的方塊開始，照答案一步一步轉 =====
+        jal   ra, render
+        jal   ra, delay
+        li    s8, 0
+anim_step:
+        bgeu  s8, s6, anim_done
+        la    t0, path
+        add   t0, t0, s8
+        lbu   s9, 0(t0)           # s9 = 轉法編號 m
+        li    s10, 0              # s10 = 面 f
+anim_div:
+        li    t0, 3
+        bltu  s9, t0, anim_turns
+        addi  s9, s9, -3
+        addi  s10, s10, 1
+        j     anim_div
+anim_turns:
+        addi  s9, s9, 1           # 轉 m + 1 次 90°
+anim_quarter:
+        mv    a0, s10
+        jal   ra, qturn
+        addi  s9, s9, -1
+        bnez  s9, anim_quarter
+        jal   ra, render          # 每轉完一步就重畫
+        jal   ra, delay
+        addi  s8, s8, 1
+        j     anim_step
+anim_done:
+# RENDER-END
+
         li    a0, 0               # 全部通過：exit code 0
         li    a7, 93
         ecall
@@ -448,6 +505,132 @@ heur:
         mv    a0, t3              # 否則回傳 t3
 heur_done:
         ret
+
+# RENDER-BEGIN
+# ===== LED：方塊展開圖 =====
+# render：依照 cube_p / cube_o 畫出 24 格貼紙。
+# Leaf function：只用 t0～t6、a2～a6，不呼叫別人。
+render:
+        li    a3, LED_MATRIX_0_BASE
+        li    a4, LED_MATRIX_0_WIDTH
+        slli  a4, a4, 2           # a4 = 一列 LED 的 bytes（WIDTH × 4）
+        la    a5, fl_tab          # 每格貼紙 4 bytes：x, y, 位置, 第幾張貼紙
+        li    a6, 24
+r_face:
+        lbu   t0, 0(a5)           # t0 = x
+        lbu   t1, 1(a5)           # t1 = y
+        lbu   t2, 2(a5)           # t2 = 位置（0 = 固定角）
+        lbu   t3, 3(a5)           # t3 = 這個位置的第幾張貼紙 j
+        li    t4, 0               # t4 = 角塊編號（固定角是 0）
+        li    t5, 0               # t5 = 扭轉
+        beqz  t2, r_have
+        la    t6, cube_p
+        add   t6, t6, t2
+        lbu   t4, -1(t6)          # cube_p[位置 - 1]
+        addi  t4, t4, 1           # 角塊編號 1～7
+        la    t6, cube_o
+        add   t6, t6, t2
+        lbu   t5, -1(t6)          # cube_o[位置 - 1]
+r_have:
+        sub   t3, t3, t5          # k = j - 扭轉
+        bgez  t3, r_k
+        addi  t3, t3, 3           # mod 3：負的就加 3
+r_k:
+        slli  t6, t4, 1
+        add   t6, t6, t4          # 角塊 × 3
+        add   t6, t6, t3
+        la    t5, cub_col
+        add   t5, t5, t6
+        lbu   t5, 0(t5)           # 這張貼紙原本屬於哪一面（0～5）
+        slli  t5, t5, 2
+        la    t6, face_rgb
+        add   t6, t6, t5
+        lw    a2, 0(t6)           # a2 = 顏色 0x00RRGGBB
+
+        slli  t0, t0, 2
+        add   t6, a3, t0          # t6 = BASE + x × 4
+r_row:
+        beqz  t1, r_draw          # 往下 y 列：加 y 次 stride，不用乘法
+        add   t6, t6, a4
+        addi  t1, t1, -1
+        j     r_row
+r_draw:
+        li    t1, 3               # 每格 3 列 × 4 個 LED
+r_line:
+        sw    a2, 0(t6)
+        sw    a2, 4(t6)
+        sw    a2, 8(t6)
+        sw    a2, 12(t6)
+        add   t6, t6, a4
+        addi  t1, t1, -1
+        bnez  t1, r_line
+        addi  a5, a5, 4
+        addi  a6, a6, -1
+        bnez  a6, r_face
+        ret
+
+# qturn：a0 = 面 f（0 = R, 1 = B, 2 = D），把 cube_p / cube_o 轉 90°。
+# 跟 solver.c 的 quarter_turn 一樣：p'[i] = p[source[i]]，o'[i] = (o[source[i]] + twist[i]) mod 3
+qturn:
+        slli  t0, a0, 3
+        sub   t0, t0, a0          # t0 = f × 7
+        la    t1, src_tab
+        add   t1, t1, t0
+        la    t2, tw_tab
+        add   t2, t2, t0
+        li    t3, 0               # i
+q_each:
+        lbu   t4, 0(t1)           # from = source[f][i]
+        la    t5, cube_p
+        add   t5, t5, t4
+        lbu   t6, 0(t5)           # cube_p[from]
+        la    t5, new_p
+        add   t5, t5, t3
+        sb    t6, 0(t5)
+        la    t5, cube_o
+        add   t5, t5, t4
+        lbu   t6, 0(t5)           # cube_o[from]
+        lbu   t4, 0(t2)           # twist[f][i]
+        add   t6, t6, t4          # 最多 2 + 2 = 4
+        li    t4, 3
+        bltu  t6, t4, q_mod_ok
+        addi  t6, t6, -3          # mod 3：一次條件減法就夠
+q_mod_ok:
+        la    t5, new_o
+        add   t5, t5, t3
+        sb    t6, 0(t5)
+        addi  t1, t1, 1
+        addi  t2, t2, 1
+        addi  t3, t3, 1
+        li    t4, 7
+        bltu  t3, t4, q_each
+        li    t3, 0               # 把新的狀態抄回 cube_p / cube_o
+q_copy:
+        la    t5, new_p
+        add   t5, t5, t3
+        lbu   t6, 0(t5)
+        la    t5, cube_p
+        add   t5, t5, t3
+        sb    t6, 0(t5)
+        la    t5, new_o
+        add   t5, t5, t3
+        lbu   t6, 0(t5)
+        la    t5, cube_o
+        add   t5, t5, t3
+        sb    t6, 0(t5)
+        addi  t3, t3, 1
+        li    t4, 7
+        bltu  t3, t4, q_copy
+        ret
+
+# delay：空轉一下，讓動畫看得到
+delay:
+        li    t0, DELAY
+d_loop:
+        addi  t0, t0, -1
+        bnez  t0, d_loop
+        ret
+# RENDER-END
 
 invalid:
         la    a0, msg_bad
