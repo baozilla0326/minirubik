@@ -1,6 +1,7 @@
 # rubik.s: optimal 2x2x2 solver in RV32I (no M extension)
 
         .data
+        .equ  EXPECT, 11              # 預期的最短步數（測資用）
 input:   .string "21345671111111"     # 要解的方塊（14 碼）
 cube_p:  .zero   7                    # 座位：每格 0～6
 cube_o:  .zero   7                    # 坐姿：每格 0～2
@@ -23,7 +24,7 @@ row_perm: .word 0, 10080, 20160        # 每一面那一列在 perm_move 裡的�
 row_ori:  .word 0, 1458, 2916
 row_pair: .word 0, 882, 1764
 msg_bad: .string "invalid state\n"
-msg_ok:  .string "valid\n"
+msg_fail: .string "FAIL\n"
 
         .text
 main:
@@ -353,7 +354,65 @@ print_done:
         la    a0, msg_nl
         li    a7, 4
         ecall
-        li    a7, 10
+
+        # ===== 4.5：驗證答案（T5）=====
+        mv    a0, s2              # a0 = 起點的 p
+        mv    a1, s1              # a1 = 起點的 o
+        li    s8, 0               # s8 = 第幾步
+verify_step:
+        bgeu  s8, s6, verify_check   # 所有步都轉完了 → 檢查
+        la    t0, path
+        add   t0, t0, s8
+        lbu   t1, 0(t0)           # t1 = 轉法編號 m
+        li    t2, 0               # t2 = 面 f
+verify_div:
+        li    t3, 3
+        bltu  t1, t3, verify_turn
+        addi  t1, t1, -3          # m -= 3
+        addi  t2, t2, 1           # f += 1
+        j     verify_div
+verify_turn:
+        slli  t2, t2, 2           # f × 4（row 表每格 4 bytes）
+        addi  t1, t1, 1           # 要轉 m + 1 次 90°
+verify_quarter:
+        la    t3, row_perm        # p = perm_move[f][p]
+        add   t3, t3, t2
+        lw    t3, 0(t3)
+        la    t4, perm_move
+        add   t3, t3, t4
+        slli  t4, a0, 1
+        add   t3, t3, t4
+        lhu   a0, 0(t3)
+        la    t3, row_ori         # o = ori_move[f][o]
+        add   t3, t3, t2
+        lw    t3, 0(t3)
+        la    t4, ori_move
+        add   t3, t3, t4
+        slli  t4, a1, 1
+        add   t3, t3, t4
+        lhu   a1, 0(t3)
+        addi  t1, t1, -1
+        bnez  t1, verify_quarter
+        addi  s8, s8, 1
+        j     verify_step
+verify_check:
+        bnez  a0, fail            # p 不是 0 → 失敗
+        bnez  a1, fail            # o 不是 0 → 失敗
+
+        # ===== 測資檢查：長度必須等於預期 =====
+        li    t0, EXPECT
+        bne   s6, t0, fail
+
+        li    a0, 0               # 全部通過：exit code 0
+        li    a7, 93
+        ecall
+
+fail:
+        la    a0, msg_fail
+        li    a7, 4
+        ecall
+        li    a0, 1               # 失敗：exit code 1
+        li    a7, 93
         ecall
 
 # heur: a0 = p, a1 = o, a2 = q  →  a0 = h = max(D, G)
