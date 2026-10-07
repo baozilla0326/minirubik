@@ -199,14 +199,21 @@ q_next:
         add   s3, s3, a4          # + c1
 
         # ===== 4.4：IDA* 搜尋 =====
-        # 每一層的狀態：st_p/st_o/st_q[d] 是第 d 層的方塊，
-        # face/turn/nextf[d] 是第 d 層正在試的面、轉了幾次、下一個要試的面。
-        la    t0, st_p
-        sh    s2, 0(t0)           # st_p[0] = p
-        la    t0, st_o
-        sh    s1, 0(t0)           # st_o[0] = o
-        la    t0, st_q
-        sh    s3, 0(t0)           # st_q[0] = q
+        # v2：搜尋過程中位址不會變，所以只在這裡載入一次，之後用「暫存器 + 位移」。
+        # s7 → 每一層的資料：st_p +0, st_o +24, st_q +48, face +72, turn +84, nextf +96, path +108
+        # s8 → 列位移表：row_perm +0, row_ori +12, row_pair +24
+        # s0 → pair_pos（pair_twist 緊接在後，+441）
+        la    s7, st_p
+        la    s8, row_perm
+        la    s9, perm_move
+        la    s10, ori_move
+        la    s11, pair_move
+        la    s0, pair_pos
+        la    a6, d_tab
+        la    a7, g_tab
+        sh    s2, 0(s7)           # st_p[0] = p
+        sh    s1, 24(s7)          # st_o[0] = o
+        sh    s3, 48(s7)          # st_q[0] = q
         mv    a0, s2
         mv    a1, s1
         mv    a2, s3
@@ -217,28 +224,21 @@ q_next:
 
 bound_loop:
         li    s5, 0               # s5 = d = 0
-        la    t0, nextf
-        sb    zero, 0(t0)         # nextf[0] = 0
-        la    t0, turn
+        sb    zero, 96(s7)        # nextf[0] = 0
         li    t1, 2
-        sb    t1, 0(t0)           # turn[0] = 2（要開始新的一面）
+        sb    t1, 84(s7)          # turn[0] = 2（要開始新的一面）
 
 node_loop:
         bltz  s5, next_bound      # d < 0：這一輪全部試完
-        la    t0, turn
-        add   t0, t0, s5
-        lbu   t1, 0(t0)           # t1 = turn[d]
+        add   t0, s7, s5          # t0 = s7 + d（byte 陣列用）
+        lbu   t1, 84(t0)          # t1 = turn[d]
         li    t2, 2
         bne   t1, t2, same_face   # 還沒轉滿 → 同一面再轉 90°
 
         # --- 開始新的一面 ---
-        la    t0, nextf
-        add   t0, t0, s5
-        lbu   t3, 0(t0)           # t3 = f = nextf[d]
+        lbu   t3, 96(t0)          # t3 = f = nextf[d]
         beqz  s5, face_ok         # d = 0：沒有上一步
-        la    t4, face
-        add   t4, t4, s5
-        lbu   t4, -1(t4)          # t4 = face[d-1]
+        lbu   t4, 71(t0)          # t4 = face[d-1]（72 - 1）
         bne   t3, t4, face_ok
         addi  t3, t3, 1           # 同一面不連轉：跳過
 face_ok:
@@ -247,79 +247,56 @@ face_ok:
         addi  s5, s5, -1          # 三面都試完：退回上一層
         j     node_loop
 face_go:
-        la    t4, face
-        add   t4, t4, s5
-        sb    t3, 0(t4)           # face[d] = f
+        sb    t3, 72(t0)          # face[d] = f
         addi  t4, t3, 1
-        sb    t4, 0(t0)           # nextf[d] = f + 1
-        la    t0, turn
-        add   t0, t0, s5
-        sb    zero, 0(t0)         # turn[d] = 0
-        slli  t5, s5, 1           # 第 d 層的 halfword 位移
-        la    t0, st_p
-        add   t0, t0, t5
-        lhu   t1, 0(t0)
-        sh    t1, 2(t0)           # st_p[d+1] = st_p[d]
-        la    t0, st_o
-        add   t0, t0, t5
-        lhu   t1, 0(t0)
-        sh    t1, 2(t0)           # st_o[d+1] = st_o[d]
-        la    t0, st_q
-        add   t0, t0, t5
-        lhu   t1, 0(t0)
-        sh    t1, 2(t0)           # st_q[d+1] = st_q[d]
+        sb    t4, 96(t0)          # nextf[d] = f + 1
+        sb    zero, 84(t0)        # turn[d] = 0
+        slli  t5, s5, 1
+        add   t5, s7, t5          # t5 = s7 + 2d（halfword 陣列用）
+        lhu   t1, 0(t5)
+        sh    t1, 2(t5)           # st_p[d+1] = st_p[d]
+        lhu   t1, 24(t5)
+        sh    t1, 26(t5)          # st_o[d+1] = st_o[d]
+        lhu   t1, 48(t5)
+        sh    t1, 50(t5)          # st_q[d+1] = st_q[d]
         j     apply_turn
 
 same_face:
         addi  t1, t1, 1
-        sb    t1, 0(t0)           # turn[d] += 1
+        sb    t1, 84(t0)          # turn[d] += 1
 
 apply_turn:
         # 第 d+1 層的方塊再轉 90°：三張轉移表各查一次
-        la    t0, face
-        add   t0, t0, s5
-        lbu   t3, 0(t0)           # t3 = f
-        slli  t3, t3, 2           # f × 4（rows 每格 4 bytes）
-        slli  t5, s5, 1           # 第 d 層的 halfword 位移
+        add   t0, s7, s5
+        lbu   t3, 72(t0)          # t3 = f
+        slli  t3, t3, 2
+        add   t3, s8, t3          # t3 = &row_perm[f]
+        slli  t5, s5, 1
+        add   t5, s7, t5          # t5 = s7 + 2d
 
-        la    t0, row_perm
-        add   t0, t0, t3
-        lw    t0, 0(t0)           # 第 f 列的位移
-        la    t6, perm_move
-        add   t0, t0, t6          # t0 = perm_move 第 f 列的位址           # t0 = perm_move 第 f 列的位址
-        la    t1, st_p
-        add   t1, t1, t5
-        lhu   t2, 2(t1)           # st_p[d+1]
+        lw    t0, 0(t3)           # perm_move 第 f 列的位移
+        add   t0, t0, s9
+        lhu   t2, 2(t5)           # st_p[d+1]
         slli  t2, t2, 1
         add   t2, t0, t2
         lhu   a0, 0(t2)           # a0 = 新的 p
-        sh    a0, 2(t1)
+        sh    a0, 2(t5)
 
-        la    t0, row_ori
-        add   t0, t0, t3
-        lw    t0, 0(t0)           # 第 f 列的位移
-        la    t6, ori_move
-        add   t0, t0, t6          # t0 = ori_move 第 f 列的位址
-        la    t1, st_o
-        add   t1, t1, t5
-        lhu   t2, 2(t1)
+        lw    t0, 12(t3)          # ori_move 第 f 列的位移
+        add   t0, t0, s10
+        lhu   t2, 26(t5)          # st_o[d+1]
         slli  t2, t2, 1
         add   t2, t0, t2
         lhu   a1, 0(t2)           # a1 = 新的 o
-        sh    a1, 2(t1)
+        sh    a1, 26(t5)
 
-        la    t0, row_pair
-        add   t0, t0, t3
-        lw    t0, 0(t0)           # 第 f 列的位移
-        la    t6, pair_move
-        add   t0, t0, t6          # t0 = pair_move 第 f 列的位址
-        la    t1, st_q
-        add   t1, t1, t5
-        lhu   t2, 2(t1)
+        lw    t0, 24(t3)          # pair_move 第 f 列的位移
+        add   t0, t0, s11
+        lhu   t2, 50(t5)          # st_q[d+1]
         slli  t2, t2, 1
         add   t2, t0, t2
         lhu   a2, 0(t2)           # a2 = 新的 q
-        sh    a2, 2(t1)
+        sh    a2, 50(t5)
 
         jal   ra, heur            # a0 = h
         addi  t0, s5, 1
@@ -327,28 +304,19 @@ apply_turn:
         bltu  s4, t0, node_loop   # > bound：剪枝
 
         # path[d] = f × 3 + turn[d]
-        la    t0, face
-        add   t0, t0, s5
-        lbu   t1, 0(t0)
+        add   t0, s7, s5
+        lbu   t1, 72(t0)          # f
         slli  t2, t1, 1
         add   t1, t1, t2          # f × 3
-        la    t0, turn
-        add   t0, t0, s5
-        lbu   t2, 0(t0)
+        lbu   t2, 84(t0)          # turn[d]
         add   t1, t1, t2
-        la    t0, path
-        add   t0, t0, s5
-        sb    t1, 0(t0)
+        sb    t1, 108(t0)         # path[d]
 
         addi  s5, s5, 1           # d + 1
         beqz  a0, solved          # h = 0：解好了
-        la    t0, nextf
-        add   t0, t0, s5
-        sb    zero, 0(t0)         # nextf[d] = 0
-        la    t0, turn
-        add   t0, t0, s5
+        sb    zero, 97(t0)        # nextf[d+1] = 0（t0 還是舊的 s7 + d）
         li    t1, 2
-        sb    t1, 0(t0)           # turn[d] = 2
+        sb    t1, 85(t0)          # turn[d+1] = 2
         j     node_loop
 
 next_bound:
@@ -475,34 +443,25 @@ fail:
 # heur: a0 = p, a1 = o, a2 = q  →  a0 = h = max(D, G)
 # Leaf function: calls nothing, uses only t registers, so no stack frame.
 heur:
-        # D 的格子：o × 49 + pair_pos[q]
+        # v2：表格位址已經在暫存器裡（s0 = pair_pos，a6 = d_tab，a7 = g_tab）
         slli  t0, a1, 5           # 32o
         slli  t1, a1, 4           # 16o
         add   t0, t0, t1
         add   t0, t0, a1          # 49o
-        la    t1, pair_pos
-        add   t1, t1, a2
-        lbu   t1, 0(t1)           # pair_pos[q]
-        add   t0, t0, t1          # D 的格子
-        la    t1, d_tab
-        add   t1, t1, t0
-        lbu   t2, 0(t1)           # t2 = D 表查到的值
-
-        # G 的格子：p × 9 + pair_twist[q]
-        slli  t0, a0, 3           # 8p
-        add   t0, t0, a0          # 9p
-        la    t1, pair_twist
-        add   t1, t1, a2
-        lbu   t1, 0(t1)           # pair_twist[q]
-        add   t0, t0, t1          # G 的格子
-        la    t1, g_tab
-        add   t1, t1, t0
-        lbu   t3, 0(t1)           # t3 = G 表查到的值
-
-        # a0 = max(t2, t3)
-        mv    a0, t2
-        bgeu  t2, t3, heur_done   # t2 已經比較大 → 直接回傳
-        mv    a0, t3              # 否則回傳 t3
+        add   t1, s0, a2          # t1 = &pair_pos[q]
+        lbu   t2, 0(t1)           # pair_pos[q]
+        lbu   t3, 441(t1)         # pair_twist[q]（緊接在 pair_pos 後面）
+        add   t0, t0, t2
+        add   t0, t0, a6
+        lbu   t2, 0(t0)           # t2 = D[o × 49 + pair_pos[q]]
+        slli  t1, a0, 3           # 8p
+        add   t1, t1, a0          # 9p
+        add   t1, t1, t3
+        add   t1, t1, a7
+        lbu   t3, 0(t1)           # t3 = G[p × 9 + pair_twist[q]]
+        mv    a0, t2              # a0 = max(t2, t3)
+        bgeu  t2, t3, heur_done
+        mv    a0, t3
 heur_done:
         ret
 
